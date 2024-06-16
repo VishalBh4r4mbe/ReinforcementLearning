@@ -1,17 +1,27 @@
 
+import os
+from os.path import dirname
+import sys
+dir_name = dirname(__file__)
+main_file = dirname(dirname(dirname(__file__)))
+print(main_file)
+sys.path.append(main_file)
 import copy
 import multiprocessing
 from absl import flags , logging,app
 import numpy as np
+
 import torch
 from main.ReplayUtils.replayBuffers import PrioritizedReplay
 from main.actors import R2D2EpsilonGreedyActor
 from main.checkpoint_manager import PytorchCheckpointManager
 from main.gym import gym_environment
+from main.networks.value_networks import R2D2DQNConv
 from models import common_loops
 from models.r2d2.r2d2 import Actor, R2D2Learner, R2D2Transition
 
-
+os.environ['OMP_NUM_THREADS'] = '1'
+os.environ['MKL_NUM_THREADS'] = '1'
 FLAGS = flags.FLAGS
 flags.DEFINE_string('environment_name', 'Pong', 'Atari name without NoFrameskip and version, like Breakout, Pong, Seaquest.')
 flags.DEFINE_integer('environment_height', 84, 'Environment frame screen height.')
@@ -20,7 +30,7 @@ flags.DEFINE_integer('environment_frame_skip', 4, 'Number of frames to skip.')
 flags.DEFINE_integer('environment_frame_stack', 1, 'Number of frames to stack.')
 flags.DEFINE_bool('compress_state', True, 'Compress state images when store in experience replay.')
 flags.DEFINE_integer('num_actors', 8, 'Number of actors')
-flags.DEFINE_integer('replay_size', 10000, 'Replay capacity')
+flags.DEFINE_integer('replay_size', 40000, 'Replay capacity')
 flags.DEFINE_integer('min_replay_size',1000, 'Minimum replay size before starting to train')
 flags.DEFINE_bool('clip_gradients', True, 'flags to clip the gradients')
 flags.DEFINE_float('max_gradient_norm',40, 'max gradient for gradient clipping')
@@ -42,13 +52,13 @@ flags.DEFINE_bool('normalize_weights', True, 'Normalize sampling weights in prio
 flags.DEFINE_float('priority_eta', 0.9, 'Priority eta to mix the max and mean absolute TD errors.')
 flags.DEFINE_float('rescale_epsilon', 0.001, 'Epsilon used in the invertible value rescaling for n-step targets.')
 flags.DEFINE_integer('n_step', 5, 'TD n-step bootstrap.')
-flags.DEFINE_integer('num_iterations', 2, 'Number of iterations to run.')
+flags.DEFINE_integer('num_iterations', 100, 'Number of iterations to run.')
 flags.DEFINE_integer('num_train_steps', int(5e5), 'Number of training env steps to run per iteration, per actor.')
 flags.DEFINE_integer('num_eval_steps', int(2e4), 'Number of evaluation env steps to run per iteration.')
 flags.DEFINE_integer('max_episode_steps', 108000, 'Maximum steps (before frame skip) per episode.')
 flags.DEFINE_integer(
     'target_net_update_interval',
-    1500,
+    2000,
     'The interval (meassured in Q network updates) to update target Q networks.',
 )
 flags.DEFINE_integer('actor_update_interval', 400, 'The frequency (measured in actor steps) to update actor local Q network.')
@@ -58,12 +68,12 @@ flags.DEFINE_bool('use_tensorboard', True, 'Use Tensorboard to monitor statistic
 flags.DEFINE_bool('actors_on_gpu', True, 'Run actors on GPU, default on.')
 flags.DEFINE_integer(
     'debug_screenshots_interval',
-    0,
+    500,
     'Take screenshots every N episodes and log to Tensorboard, default 0 no screenshots.',
 )
 flags.DEFINE_string('tag', '', 'Add tag to Tensorboard log file.')
-flags.DEFINE_string('results_csv_path', './logs/r2d2_classic_results.csv', 'Path for CSV log file.')
-flags.DEFINE_string('checkpoint_dir', './checkpoints', 'Path for checkpoint directory.')
+flags.DEFINE_string('results_csv_path', './logs/r2d2_atari_results.csv', 'Path for CSV log file.')
+flags.DEFINE_string('checkpoint_dir', f'{dir_name}/checkpoints', 'Path for checkpoint directory.')
 
 def main(argv):
     del argv
@@ -91,7 +101,7 @@ def main(argv):
     train_env = build_env()
     eval_env = build_env()
     action_dim = train_env.action_space.__dict__.__getitem__('n')
-    state_dim = train_env.observation_space.shape[0]
+    state_dim = train_env.observation_space.shape
     logging.info(f'environment name:{FLAGS.environment_name}')
     logging.info(f'observation space dimension:{train_env.observation_space.shape}')
     logging.info(f'action space dimension:{action_dim}')

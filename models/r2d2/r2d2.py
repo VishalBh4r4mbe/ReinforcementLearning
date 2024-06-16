@@ -226,7 +226,7 @@ class R2D2Learner(Learner):
     def step(self) -> Iterable[Mapping[Text, float]]:
         self._step_t += 1
 
-        if self._replay.transitions_added < self._min_replay_size or self._step_t % max(4, int(self._batch_size * 0.20)) != 0:
+        if self._replay.transitions_added < self._min_replay_size or self._step_t % max(4, int(self._batch_size * 0.25)) != 0:
             return
 
         self._learn()
@@ -295,10 +295,10 @@ class R2D2Learner(Learner):
         
         hidden_state = tuple(s.clone().to(device=self._device) for s in initial_hidden_state)
         target_hidden_state = tuple(s.clone().to(device=self._device) for s in initial_hidden_state)
-        final_hidden_state =  self._network(state_t,last_action,reward,hidden_state)
-        final_target_hidden_state = self._target_network(state_t,last_action,reward,target_hidden_state)
+        final_hidden_state =  self._network(state_t,last_action,reward,hidden_state).hidden_state
+        final_target_hidden_state = self._target_network(state_t,last_action,reward,target_hidden_state).hidden_state
         return final_hidden_state, final_target_hidden_state
-    def _get_initial_hidden_state(self,transitions:R2D2Transition):
+    def _get_initial_hidden_state(self,transitions:R2D2Transition)->Tuple[torch.Tensor,torch.Tensor]:
         init_h = torch.from_numpy(transitions.initital_hidden_state[0:1]).squeeze(0).to(device=self._device, dtype=torch.float32)
         init_c = torch.from_numpy(transitions.initial_cell_state[0:1]).squeeze(0).to(device=self._device, dtype=torch.float32)
         init_h = init_h.swapaxes(0, 1)

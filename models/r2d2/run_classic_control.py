@@ -29,7 +29,7 @@ FLAGS = flags.FLAGS
 
 flags.DEFINE_string(
     'environment_name',
-    'MountainCar-v0',
+    'LunarLander-v2',
     'Classic control tasks name like CartPole-v1, LunarLander-v2, MountainCar-v0, Acrobot-v1.',
     )
 flags.DEFINE_integer('num_actors', 8, 'Number of actors')
@@ -40,7 +40,7 @@ flags.DEFINE_float('max_gradient_norm',0.5, 'max gradient for gradient clipping'
 flags.DEFINE_float('learning_rate',0.0005,'learning rate')
 flags.DEFINE_float('adam_epsilon', 0.001,'epsilon for adam optimizer')
 flags.DEFINE_float('discount' , 0.997,'Discount Rate')
-flags.DEFINE_integer('unroll_length', 30, 'Sequence of transitions to unroll before add to replay.')
+flags.DEFINE_integer('unroll_length', 15, 'Sequence of transitions to unroll before add to replay.')
 flags.DEFINE_integer(
     'burn_in',
     0,
@@ -56,12 +56,12 @@ flags.DEFINE_bool('normalize_weights', True, 'Normalize sampling weights in prio
 flags.DEFINE_float('priority_eta', 0.9, 'Priority eta to mix the max and mean absolute TD errors.')
 flags.DEFINE_float('rescale_epsilon', 0.001, 'Epsilon used in the invertible value rescaling for n-step targets.')
 flags.DEFINE_integer('n_step', 5, 'TD n-step bootstrap.')
-flags.DEFINE_integer('num_iterations', 5, 'Number of iterations to run.')
+flags.DEFINE_integer('num_iterations', 2, 'Number of iterations to run.')
 flags.DEFINE_integer('num_train_steps', int(5e5), 'Number of training env steps to run per iteration, per actor.')
 flags.DEFINE_integer('num_eval_steps', int(2e4), 'Number of evaluation env steps to run per iteration.')
 flags.DEFINE_integer(
     'target_net_update_interval',
-    100,
+    400,
     'The interval (meassured in Q network updates) to update target Q networks.',
 )
 flags.DEFINE_integer('actor_update_interval', 100, 'The frequency (measured in actor steps) to update actor local Q network.')

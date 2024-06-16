@@ -247,3 +247,52 @@ class R2D2DQN(torch.nn.Module):
     
     def get_initial_hidden_state(self, batch_size: int) -> Tuple[torch.Tensor]:
         return tuple(torch.zeros(self.lstm.num_layers, batch_size, self.lstm.hidden_size) for _ in range(2))                
+
+class R2D2DQNConv(torch.nn.Module):
+    def __init__(self,state_dim :int, action_dim :int):
+        if action_dim<1:
+            raise ValueError("action dimension must be greater than 0")
+        if len(state_dim) != 3:
+            raise ValueError("state dimension len must be 3")
+        super().__init__()
+        self.action_dim = action_dim
+        self.feature_extractor = BackboneConv(state_dim)
+        self.lstm = torch.nn.LSTM(self.feature_extractor.out_features + action_dim + 1,hidden_size=512,num_layers=1)
+        self.value_head = torch.nn.Sequential(
+            torch.nn.Linear(self.lstm.hidden_size,512),
+            torch.nn.ReLU(),
+            torch.nn.Linear(512,1)
+        )
+        self.advantage_head = torch.nn.Sequential(
+            torch.nn.Linear(self.lstm.hidden_size,512),
+            torch.nn.ReLU(),
+            torch.nn.Linear(512,action_dim)
+        )
+        init_weights_of_net(self)
+    
+    def forward(self, state_t:torch.Tensor, action_t_minus_1:torch.Tensor,reward_t:torch.Tensor,hidden_state:Optional[Tuple[torch.Tensor, torch.Tensor]]):
+        T,B,*_ = state_t.shape
+        x = torch.flatten(state_t,0,1)
+        x = x.float()/255.0
+        x = self.feature_extractor(x)
+        x = x.view(T*B,-1)
+        action_t_minus_1_one_hot_encoded = torch.nn.functional.one_hot(action_t_minus_1.view(T*B),self.action_dim).float().to(device=x.device)
+        reward = reward_t.view(T*B,1)
+        core_input = torch.cat([x,reward,action_t_minus_1_one_hot_encoded],dim=-1)
+        core_input = core_input.view(T,B,-1)
+        
+        if hidden_state is None:
+            hidden_state = self.get_initial_hidden_state(batch_size=B)
+            hidden_state = tuple(s.to(device=x.device) for s in hidden_state)
+        x, hidden_state = self.lstm(core_input, hidden_state)
+        x = torch.flatten(x, 0, 1)  # Merge batch and time dimension.
+        advantages = self.advantage_head(x)  # [T*B, action_dim]
+        values = self.value_head(x)  # [T*B, 1]
+        max_values,_ = torch.max(advantages,dim=-1,keepdim=True)
+
+        q_values = values + (advantages - max_values)
+        q_values = q_values.view(T, B, -1)  # reshape to in the range [B, T, action_dim]
+        return RNNDQNOutputs(q_values=q_values, hidden_state=hidden_state)
+
+    def get_initial_hidden_state(self,batch_size) -> Tuple[torch.Tensor,torch.Tensor]:
+        return tuple(torch.zeros(self.lstm.num_layers, batch_size, self.lstm.hidden_size) for _ in range(2))
