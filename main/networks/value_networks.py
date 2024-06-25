@@ -11,7 +11,13 @@ class RNNDQNOutputs(NamedTuple):
     hidden_state: Optional[Tuple[torch.Tensor, torch.Tensor]]
 class DQNOutput(NamedTuple):
     q_values: torch.Tensor
-    
+class NGUNetworkInputs(NamedTuple):
+    state_t: torch.Tensor
+    action_t_minus_1: torch.Tensor
+    extrinsic_reward_t: torch.Tensor
+    intrinsic_reward_t: torch.Tensor
+    policy_index_t: torch.Tensor
+    hidden_state: Optional[Tuple[torch.Tensor, torch.Tensor]]
 class DQNNet(torch.nn.Module):
     def __init__(self,state_dimension:int,action_dimension:int):
         if action_dimension <=0:
@@ -295,4 +301,56 @@ class R2D2DQNConv(torch.nn.Module):
         return RNNDQNOutputs(q_values=q_values, hidden_state=hidden_state)
 
     def get_initial_hidden_state(self,batch_size) -> Tuple[torch.Tensor,torch.Tensor]:
+        return tuple(torch.zeros(self.lstm.num_layers, batch_size, self.lstm.hidden_size) for _ in range(2))
+
+class NGUConv(torch.nn.Module):
+    def __init__(self,state_dim:int,action_dim:int,num_policies:int):
+        super().__init__()
+        self.action_dim = action_dim
+        self.num_policies = num_policies
+        self.feature_extractor = BackboneConv(state_dim)
+        output_size = self.feature_extractor.out_features + self.num_policies + self.action_dim + 1 + 1
+        self.lstm = torch.nn.LSTM(input_size=output_size,hidden_size=512,num_layers=1)
+        self.advatage_head = torch.nn.Sequential(
+            torch.nn.Linear(self.lstm.hidden_size,512),
+            torch.nn.ReLU(),
+            torch.nn.Linear(512,action_dim)
+        )
+        self.value_head = torch.nn.Sequential(
+            torch.nn.Linear(self.lstm.hidden_size,512),
+            torch.nn.ReLU(),
+            torch.nn.Linear(512,1)
+        )
+        init_weights_of_net(self)
+    def forward(self,input_:NGUNetworkInputs):
+        state_t = input_.state_t
+        action_t_minus_1 = input_.action_t_minus_1
+        extrinsic_reward_t = input_.extrinsic_reward_t
+        intrinsic_reward_t = input_.intrinsic_reward_t
+        policy_index = input_.policy_index_t
+        hidden_state = input_.hidden_state
+        T,B,*_ = state_t.shape
+        x = torch.flatten(state_t,0,1)
+        x = x.float()/255.0
+        x = self.feature_extractor(x)
+        x = x.view(T*B,-1)
+        one_hot_beta_encoding = torch.nn.functional.one_hot(policy_index.view(T*B),self.num_policies).float().to(device=x.device)
+        one_hot_action_t_minus_1_encoding = torch.nn.functional.one_hot(action_t_minus_1.view(T*B),self.action_dim).float().to(x.device)
+        intrinsic_reward = intrinsic_reward_t.view(T*B,1)
+        extrinsic_reward = extrinsic_reward_t.view(T*B,1)
+        input_to_net = torch.cat([x,one_hot_action_t_minus_1_encoding,one_hot_beta_encoding,intrinsic_reward,extrinsic_reward],dim=-1)
+        input_to_net = input_to_net.view(T,B,-1)
+        if hidden_state is None:
+            hidden_state = self.get_initial_hidden_state(batch_size=B)
+            hidden_state = tuple(s.to(device=x.device) for s in hidden_state)
+        x,hidden_state = self.lstm(input_to_net,hidden_state)
+        x = torch.flatten(x,0,1)
+        advantages = self.advatage_head(x)
+        values = self.value_head(x)
+        max_values,_ = torch.max(advantages,dim=-1,keepdim=True)
+
+        q_values = values + (advantages - max_values)
+        q_values = q_values.view(T, B, -1)  # reshape to in the range [B, T, action_dim]
+        return RNNDQNOutputs(q_values=q_values,hidden_state=hidden_state)
+    def get_initial_hidden_state(self,batch_size):
         return tuple(torch.zeros(self.lstm.num_layers, batch_size, self.lstm.hidden_size) for _ in range(2))

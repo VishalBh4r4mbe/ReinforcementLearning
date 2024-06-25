@@ -20,7 +20,10 @@ from main.abstractClasses.agent import Agent
 from main.abstractClasses.learner import Learner
 from main.abstractClasses.timestep import TimeStepPair
 from main.curiosity.episodic_bonus import EpisodicBonusModule
+from main.curiosity.lifelong_bonus import RNDLifeLongBonusModule
 from main.functions import calculate_distributed_priorities_from_td_error, get_actors_exploration_rate, get_ngu_policy_betas_and_gammas, transformed_retrace
+from main.networks.value_networks import NGUNetworkInputs
+from main.normalizers import PytorchRunningMeanStd
 from main.transforms import IDENTITY_PAIR, SIGNED_HYPERBOLIC_PAIR
 from models.common import disable_autograd, numpy_to_tensor
 
@@ -92,8 +95,8 @@ class NGUActor(Agent):
             raise ValueError(f'Expect policy_beta to be in [0,1], got {policy_beta}')
         if not episodic_memory_size > 0:
             raise ValueError(f'Expect episodic_memory_size to be positive integer, got {episodic_memory_size}')
-        if not num_neighbours > 0 :
-            raise ValueError(f'Expect num_neighbours to be positive integer, got {num_neighbours}')
+        if not num_neighbors > 0 :
+            raise ValueError(f'Expect num_neighbours to be positive integer, got {num_neighbors}')
         if not 0.0 <= cluster_distance <= 1.0:
             raise ValueError(f'Expect cluster_distance to be in [0,1], got {cluster_distance}')
         if not 0.0 <= kernel_epsilon <= 1.0:
@@ -150,7 +153,7 @@ class NGUActor(Agent):
             cluster_distance = cluster_distance,
             maximum_similarity = maximum_similarity,
         )
-        self._life_long_bonus_module = LifeLongBonusModule(
+        self._life_long_bonus_module = RNDLifeLongBonusModule(
             target_network = RND_target_network,
             predictor_network = RND_predictor_network,
             device = device,
@@ -222,7 +225,7 @@ class NGUActor(Agent):
         intrinsic_reward = numpy_to_tensor(self.intrinsic_reward,self._device,torch.float32)
         policy_index = numpy_to_tensor(self._policy_index,self._device,torch.int64)
         hidden_state = tuple(s.to(device=self._device) for s in self._lstm_state)
-        return NGUNetworkInput(
+        return NGUNetworkInputs(
             state_t = state.unsqueeze(0),
             action_t_minus_1 = last_action.unsqueeze(0),
             extrinsic_reward = extrinsic_reward.unsqueeze(0),
@@ -334,7 +337,7 @@ class NGULearner(Learner):
         self._clip_gradients = clip_gradients
         self._max_gradient_norm = max_gradient_norm
         
-        self._rnd_observation_normalizer = PyTorchRunningMeanStd(shape = (1,84,84),device = self._device)
+        self._rnd_observation_normalizer = PytorchRunningMeanStd(shape = (1,84,84),device = self._device)
         
         self._replay_buffer = replay_buffer
         self._min_replay_size = minimum_replay_size
@@ -425,7 +428,7 @@ class NGULearner(Learner):
 
         # Get q values from Q network
         q_t = q_network(
-            NguNetworkInputs(
+            NGUNetworkInputs(
                 s_t=state_t,
                 a_tm1=last_action,
                 ext_r_t=extrinsic_reward,
