@@ -19,6 +19,7 @@ from main.gym import gym_environment
 from main.networks.value_networks import R2D2DQNConv
 from models import common_loops
 from models.r2d2.r2d2 import Actor, R2D2Learner, R2D2Transition
+from grokfast_pytorch import GrokFastAdamW
 
 os.environ['OMP_NUM_THREADS'] = '1'
 os.environ['MKL_NUM_THREADS'] = '1'
@@ -58,7 +59,7 @@ flags.DEFINE_integer('num_eval_steps', int(2e4), 'Number of evaluation env steps
 flags.DEFINE_integer('max_episode_steps', 108000, 'Maximum steps (before frame skip) per episode.')
 flags.DEFINE_integer(
     'target_net_update_interval',
-    2000,
+    1000,
     'The interval (meassured in Q network updates) to update target Q networks.',
 )
 flags.DEFINE_integer('actor_update_interval', 400, 'The frequency (measured in actor steps) to update actor local Q network.')
@@ -106,7 +107,8 @@ def main(argv):
     logging.info(f'observation space dimension:{train_env.observation_space.shape}')
     logging.info(f'action space dimension:{action_dim}')
     network = R2D2DQNConv(state_dim=state_dim, action_dim=action_dim)
-    optimizer = torch.optim.AdamW(network.parameters(), lr=FLAGS.learning_rate, eps=FLAGS.adam_epsilon)
+    optimizer = GrokFastAdamW(network.parameters(),lr=FLAGS.learning_rate,eps =FLAGS.adam_epsilon)
+    # optimizer = torch.optim.AdamW(network.parameters(), lr=FLAGS.learning_rate, eps=FLAGS.adam_epsilon)
     observation , _ = train_env.reset()
     output = network(torch.from_numpy(observation[None,None,...]).float(),torch.zeros(1,1).long(),torch.zeros(1,1),network.get_initial_hidden_state(1))
     assert output.q_values.shape == (1, 1, action_dim)

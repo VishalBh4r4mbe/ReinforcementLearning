@@ -6,8 +6,8 @@ import torch
 
 
 class TransformationPair(NamedTuple):
-    forward = Callable[[Any],Any]
-    inverse = Callable[[Any],Any]
+    forward : Callable[[Any],Any]
+    inverse : Callable[[Any],Any]
 
 def identity(self, x):
     return x

@@ -245,9 +245,7 @@ class R2D2DQN(torch.nn.Module):
         x = torch.flatten(x, 0, 1)  # Merge batch and time dimension.
         advantages = self.advantage_head(x)  # [T*B, action_dim]
         values = self.value_head(x)  # [T*B, 1]
-        max_values,_ = torch.max(advantages,dim=-1,keepdim=True)
-
-        q_values = values + (advantages - max_values)
+        q_values = values + (advantages - torch.mean(advantages,dim=-1,keepdim=True))
         q_values = q_values.view(T, B, -1)  # reshape to in the range [B, T, action_dim]
         return RNNDQNOutputs(q_values=q_values, hidden_state=hidden_state)
     
@@ -294,9 +292,8 @@ class R2D2DQNConv(torch.nn.Module):
         x = torch.flatten(x, 0, 1)  # Merge batch and time dimension.
         advantages = self.advantage_head(x)  # [T*B, action_dim]
         values = self.value_head(x)  # [T*B, 1]
-        max_values,_ = torch.max(advantages,dim=-1,keepdim=True)
-
-        q_values = values + (advantages - max_values)
+        
+        q_values = values + (advantages - torch.mean(advantages,dim=-1,keepdim=True))
         q_values = q_values.view(T, B, -1)  # reshape to in the range [B, T, action_dim]
         return RNNDQNOutputs(q_values=q_values, hidden_state=hidden_state)
 
@@ -347,9 +344,8 @@ class NGUConv(torch.nn.Module):
         x = torch.flatten(x,0,1)
         advantages = self.advatage_head(x)
         values = self.value_head(x)
-        max_values,_ = torch.max(advantages,dim=-1,keepdim=True)
 
-        q_values = values + (advantages - max_values)
+        q_values = values + (advantages - torch.mean(advantages,dim=-1,keepdim=True))
         q_values = q_values.view(T, B, -1)  # reshape to in the range [B, T, action_dim]
         return RNNDQNOutputs(q_values=q_values,hidden_state=hidden_state)
     def get_initial_hidden_state(self,batch_size):

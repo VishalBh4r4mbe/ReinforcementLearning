@@ -15,8 +15,9 @@ from main.abstractClasses import action
 from main.abstractClasses.agent import Agent
 from main.abstractClasses.learner import Learner
 from main.abstractClasses.timestep import TimeStepPair
-from main.functions import calculate_distributed_priorities_from_td_error, get_actors_exploration_rate, n_step_bellman_target, signed_hyperbolic, signed_parabolic
+from main.functions import calculate_distributed_priorities_from_td_error, get_actors_exploration_rate, n_step_bellman_target
 from main.networks.value_networks import RNNDQNOutputs
+from main.transforms import signed_hyperbolic, signed_parabolic
 from models.common import disable_autograd, numpy_to_tensor
 
 

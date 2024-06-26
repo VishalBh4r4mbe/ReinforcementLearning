@@ -11,7 +11,7 @@ import multiprocessing
 import numpy as np
 import torch
 import copy
-
+from grokfast_pytorch import GrokFastAdamW
 FLAGS = flags.FLAGS
 flags.DEFINE_string(
     'environment_name',
@@ -154,5 +154,4 @@ def main(argv):
     if torch.backends.cudnn.enabled:
         torch.backends.cudnn.benchmark = True
         torch.backends.cudnn.deterministic = True
-    
     

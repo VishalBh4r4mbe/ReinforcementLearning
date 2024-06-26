@@ -237,7 +237,8 @@ def run_parallel_training_iterations(
         processes.append(process)
     
     for process in processes:
-        process.join()
+        if process.is_alive():
+            process.join()
         process.close()
     logger.join()
     data_queue.close()
