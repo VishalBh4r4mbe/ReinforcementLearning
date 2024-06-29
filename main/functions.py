@@ -106,9 +106,9 @@ def general_off_policy_returns_from_q_and_v(
 ):
     g = reward_t[-1] + discount_t[-1]* v_t[-1]
     returns = [g]
-    for i in reversed(range(len(q_t.shape[0]))): #T
+    for i in reversed(range(q_t.shape[0])): #T
         g = reward_t[i] + discount_t[i] * (v_t[i] - c_t[i] * q_t[i] + c_t[i] * g)
-        returns.insert(g,0)
+        returns.insert(0,g)
     return torch.stack(returns,dim=0).detach()
 transformed_general_off_policy_returns_from_action_values = transform_values(
 	general_off_policy_returns_from_action_values,0
@@ -128,7 +128,7 @@ def transformed_retrace(
 	transformation_pair = IDENTITY_PAIR
 ):
 	pi_action_t = get_batched_index(pi_t,action_t)
-	c_t = torch.minimum(torch.tensor(1.0,pi_action_t/(mu_t + epsilon))) * lambda_
+	c_t = torch.minimum(torch.tensor(1.0),pi_action_t/(mu_t + epsilon)) * lambda_
 	with torch.no_grad():
 		target_t_minus_1 = transformed_general_off_policy_returns_from_action_values(transformation_pair,q_t,action_t,reward_t,discount_t,c_t,pi_t)
 	q_a_t_minus_1 = get_batched_index(q_t_minus_1,action_t_minus_1)
@@ -162,8 +162,8 @@ def get_ngu_betas(
 		elif i == num_policies - 1:
 			results.append(beta)
 		else:
-			_beta_i = beta * sigmoid(10 * ((2 * i - (num_policies - 2)) / (num_policies - 2)))
-		results.append(_beta_i)
+			beta = beta * sigmoid(10 * ((2 * i - (num_policies - 2)) / (num_policies - 2)))
+			results.append(beta)
 
 	return results
 def get_ngu_gammas(

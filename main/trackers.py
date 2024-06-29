@@ -286,7 +286,7 @@ def make_default_trackers(log_dir=None, debug_screenshots_interval=0,folder=None
         return [EpisodeTracker(), StepRateTracker()]
     
 
-def make_learner_trackers(run_log_dir=None):
+def make_learner_trackers(run_log_dir=None,folder=None):
     """
     Create trackers for learner for parallel training (actor-learner) run.
 
@@ -295,13 +295,15 @@ def make_learner_trackers(run_log_dir=None):
     """
 
     if run_log_dir:
-        tb_log_dir = Path(f'runs/{run_log_dir}')
-
+        if folder is not None:
+            run_log_dir = Path(folder + f'/runs/{run_log_dir}')
+        else:
+            run_log_dir = Path(f'runs/{run_log_dir}')
         # Remove existing log directory
-        if tb_log_dir.exists() and tb_log_dir.is_dir():
-            shutil.rmtree(tb_log_dir)
+        if run_log_dir.exists() and run_log_dir.is_dir():
+            shutil.rmtree(run_log_dir)
 
-        writer = SummaryWriter(tb_log_dir)
+        writer = SummaryWriter(run_log_dir)
 
         return [TensorboardLearnerStatisticsTracker(writer)]
 

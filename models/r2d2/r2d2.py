@@ -233,6 +233,7 @@ class R2D2Learner(Learner):
         self._learn()
         yield self.statistics
     def reset(self) -> None:
+        return
         """Called for reset"""
     def received_item_from_queue(self, item) -> None:
         """Received item send by actors through multiprocessing queue."""

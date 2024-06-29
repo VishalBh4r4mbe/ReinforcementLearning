@@ -1,4 +1,5 @@
 import dis
+import logging
 from turtle import distance
 from typing import Dict, NamedTuple
 import torch
@@ -11,7 +12,9 @@ class KNNQueryResult(NamedTuple):
     
 def knn_query(embedding,memory,num_neighbors):
     assert memory.shape[0] >= num_neighbors
-    distances = torch.cdist(embedding.squeeze(0),memory).squeeze(0).pow(2)
+    # logging.info(embedding.shape)
+    # logging.info(memory.shape)
+    distances = torch.cdist(embedding.unsqueeze(0),memory).squeeze(0).pow(2)
     distances,indices = distances.topk(num_neighbors,largest=False)
     neighbors = torch.stack([memory[ind] for ind in indices],dim=0)
     return KNNQueryResult(neighbors = neighbors,neighbor_indices=indices,neighbor_distances=distances)
@@ -25,7 +28,7 @@ class EpisodicBonusModule:
         kernel_epsilon : float,
         cluster_distance : float,
         maximum_similarity : float,
-        c_constant : float
+        c_constant : float =0.001
     ) -> None:
         self._embedding_network = embedding_network.to(device=device)
         self._device = device

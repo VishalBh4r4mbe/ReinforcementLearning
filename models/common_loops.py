@@ -137,9 +137,6 @@ def run_env_loop(
             action_t = agent.step(timestep_t)
             yield (env, timestep_t, agent, action_t)
             action_t_minus_1 = action_t
-            def debug_and_return(el):
-                logger.info(el)
-                return el
             (observation, reward, terminated,truncated, info) = env.step(action_t_minus_1)
             done = terminated or truncated
             first_step = False
@@ -175,7 +172,8 @@ def run_parallel_training_iterations(
     csv_file:str,
     use_tensorboard:bool,
     tag:str = None,
-    debug_screenshots_interval:int = 0
+    debug_screenshots_interval:int = 0,
+    folder = None
 )->None:
     iteration_count = multiprocessing.Value('i', 0)
     start_iteration_event = multiprocessing.Event()
@@ -197,7 +195,8 @@ def run_parallel_training_iterations(
             checkpoint_manager,
             len(actors),
             use_tensorboard,
-            tag
+            tag,
+            folder
         )
     )
     learner_thread.start()
@@ -208,7 +207,7 @@ def run_parallel_training_iterations(
             csv_file
         )
     )
-    
+    logger.start()
     num_actors = len(actors)
     actors_tensorboard_log_prefix = [None for i in range(num_actors)]
     if use_tensorboard:
@@ -230,15 +229,15 @@ def run_parallel_training_iterations(
                 start_iteration_event,
                 stop_event,
                 tensorboard_log_prefix,
-                debug_screenshots_interval
+                debug_screenshots_interval,
+                folder
             )
         )
         process.start()
         processes.append(process)
     
     for process in processes:
-        if process.is_alive():
-            process.join()
+        process.join()
         process.close()
     logger.join()
     data_queue.close()
@@ -257,10 +256,11 @@ def run_learner(
     checkpoint_manager:PytorchCheckpointManager,
     num_actors:int,
     use_tensorboard:bool,
-    tag:str = None
+    tag:str = None,
+    folder = None,
 )->None:
     learner_tensorboard_log_prefixes = get_tensorboard_log_prefix(eval_env.spec.id,learner.agent_name,tag,'train') if use_tensorboard else None
-    learner_trackers = make_learner_trackers(learner_tensorboard_log_prefixes)
+    learner_trackers = make_learner_trackers(learner_tensorboard_log_prefixes,folder=folder)
     for tracker in learner_trackers:
         tracker.reset()
     should_run_evaluator = False
@@ -271,7 +271,7 @@ def run_learner(
         evaluation_tracker_tensorboard_prefix = (
             get_tensorboard_log_prefix(eval_env.spec.id,eval_agent.agent_name,tag,'eval') if use_tensorboard else None
         )
-        evaluation_trackers = make_default_trackers(evaluation_tracker_tensorboard_prefix) 
+        evaluation_trackers = make_default_trackers(evaluation_tracker_tensorboard_prefix,folder=folder) 
     
     for iteration in range(1,num_iterations + 1):
         logging.info(f'Training iteration {iteration}')
@@ -359,18 +359,35 @@ def run_actor(
     start_iteration_event:multiprocessing.Event,
     stop_iteration_event:multiprocessing.Event,
     tensorboard_log_prefix:str = None,
-    debug_screenshots_interval:int = 0
+    debug_screenshots_interval:int = 0,
+    folder=None
 ):
     init_absl_logging()
     handle_exit_signal()
-    actor_trackers = make_default_trackers(tensorboard_log_prefix,debug_screenshots_interval)
+    actor_trackers = make_default_trackers(tensorboard_log_prefix,debug_screenshots_interval,folder)
     while not stop_iteration_event.is_set():
         if not start_iteration_event.is_set():
             continue
         logging.info(f'Starting Actor:{actor.agent_name}')
         iteration = iteration_count.value
         train_stats = run_env_steps(num_train_steps,actor,actor_env,actor_trackers)
-        data_queue.put('PROCESS_DONE')
+        try:
+            data_queue.put('PROCESS_DONE', block=False)
+        except queue.Full:
+            # Queue is full, log the issue and retry
+            logging.info("Data queue is full. Retrying...")
+            retry_count = 0
+            while retry_count < 10:  # Try up to 5 times
+                time.sleep(1)  # Wait a bit before retrying
+                try:
+                    data_queue.put('PROCESS_DONE', block=False)
+                    break  # Successfully put data in queue
+                except queue.Full:
+                    retry_count += 1
+                    logging.info(f"Data queue still full. Retry {retry_count}/10")
+            
+            if retry_count == 10:
+                logging.info("Failed to put data in queue after 10 attempts. Skipping.")
         if start_iteration_event.is_set():
             start_iteration_event.clear()
         log_output = [

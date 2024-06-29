@@ -76,6 +76,7 @@ class NGUActor(Agent):
         actor_update_interval:int,
         device:torch.device,
         shared_parameters:dict,
+        c_constant:float=0.001
     ) -> None:
         if not 0.0 <= extrinsic_discount <= 1.0:
             raise ValueError(f'Expect extrinsic_discount to be in [0,1], got {extrinsic_discount}')
@@ -134,15 +135,15 @@ class NGUActor(Agent):
         self._betas ,self._gammas = get_ngu_policy_betas_and_gammas(
             num_policies=num_policies,
             beta = policy_beta,
-            maximum_gamma = extrinsic_discount,
-            minimum_gamma = intrinsic_discount
+            gamma_maximum = extrinsic_discount,
+            gamma_minimum = intrinsic_discount
         )
         self._policy_index = None
         self._policy_beta = None
         self._policy_discount = None
         self._sample_policy()
         self._reset_episodic_memory = reset_episodic_memory
-        self._exploration_rate = get_actors_exploration_rate(num_actors=num_actors)[self.rank]
+        self._exploration_rate = get_actors_exploration_rate(n=num_actors)[self.rank]
         
         self._episodic_bonus_module = EpisodicBonusModule(
             embedding_network = embedding_network,
@@ -152,6 +153,7 @@ class NGUActor(Agent):
             kernel_epsilon = kernel_epsilon,
             cluster_distance = cluster_distance,
             maximum_similarity = maximum_similarity,
+            c_constant=c_constant,
         )
         self._life_long_bonus_module = RNDLifeLongBonusModule(
             target_network = RND_target_network,
@@ -186,7 +188,7 @@ class NGUActor(Agent):
             init_c=self._lstm_state[1].squeeze(1).cpu().numpy(),
         )
         unrolled_transition = self._unroller.add(transition,timestep_pair.done)
-        state = numpy_to_tensor(unrolled_transition,self._device,torch.float32)
+        state = numpy_to_tensor(timestep_pair.observation[None,...],self._device,torch.float32)
         self._life_long_bonus_t = self._life_long_bonus_module.get_bonus(state)
         self._episodic_bonus_t = self._episodic_bonus_module.get_bonus(state)
         self._last_action = action
@@ -220,25 +222,26 @@ class NGUActor(Agent):
         return q_values.cpu().numpy() , action,action_probability,pi.hidden_state
     def _network_inputs(self,timestep:TimeStepPair):
         state = numpy_to_tensor(timestep.observation[None,...],self._device,torch.float32)
-        last_action = numpy_to_tensor(self._last_action,self._device,torch.int64)
-        extrinsic_reward = numpy_to_tensor(timestep.reward,self._device,torch.float32)
-        intrinsic_reward = numpy_to_tensor(self.intrinsic_reward,self._device,torch.float32)
-        policy_index = numpy_to_tensor(self._policy_index,self._device,torch.int64)
+        last_action = torch.tensor(self._last_action).to(device= self._device,dtype=torch.int64)
+        extrinsic_reward = torch.tensor(timestep.reward).to(device=self._device,dtype=torch.float32)
+        intrinsic_reward = torch.tensor(self.intrinsic_reward).to(device=self._device,dtype=torch.float32)
+        policy_index = torch.tensor(self._policy_index).to(device=self._device,dtype=torch.int64)
         hidden_state = tuple(s.to(device=self._device) for s in self._lstm_state)
         return NGUNetworkInputs(
             state_t = state.unsqueeze(0),
             action_t_minus_1 = last_action.unsqueeze(0),
-            extrinsic_reward = extrinsic_reward.unsqueeze(0),
-            intrinsic_reward = extrinsic_reward.unsqueeze(0),
-            policy_index = policy_index.unsqueeze(0),
+            extrinsic_reward_t = extrinsic_reward.unsqueeze(0),
+            intrinsic_reward_t = intrinsic_reward.unsqueeze(0),
+            policy_index_t = policy_index.unsqueeze(0),
             hidden_state = hidden_state,
         )
     def _load_unrolled_transition_to_queue(self,transition:NGUTransition):
         self._data_queue.put(transition)
-    def _update_action_network(self,update_embedding:bool = False):
+    def _update_actor_network(self,update_embedding:bool = False):
+        
         q_state_dict = self._shared_parameters['network']
         embedding_state_dict = self._shared_parameters['embedding_network']
-        RND_state_dict = self._shared_parameters['rnd_state_dict']
+        RND_state_dict = self._shared_parameters['rnd_predictor_network']
         if update_embedding:
             state_net_pairs = zip(
                 (q_state_dict, embedding_state_dict, RND_state_dict),
@@ -351,9 +354,9 @@ class NGULearner(Learner):
         self._step_t = -1
         self._update_t = 0
         self._target_update_t = 0
-        self._retrace_loss_t = 0
-        self._rnd_loss_t = 0
-        self._embedding_network_loss_t = 0
+        self._retrace_loss_t = np.nan
+        self._rnd_loss_t = np.nan
+        self._embedding_network_loss_t = np.nan
     
     def step(self) -> Iterable[Mapping[Text,float]]:
         self._step_t +=1 
@@ -362,7 +365,7 @@ class NGULearner(Learner):
         self._learn()
         yield self.statistics
     def reset(self) -> None:
-        pass
+        return
     def received_item_from_queue(self, item) -> None:
         self._replay_buffer.add(item,self._max_seen_priority)
     
@@ -384,7 +387,7 @@ class NGULearner(Learner):
         self._replay_buffer.update_priorities(indices,priorities)
         self._shared_parameters['network'] = self.get_network_state_dict()
         self._shared_parameters['embedding_network'] = self.get_embedding_network_state_dict()
-        self._shared_parameters['rnd_state_dict'] = self.get_rnd_predictor_network_state_dict()
+        self._shared_parameters['rnd_predictor_network'] = self.get_rnd_predictor_network_state_dict()
         if self._update_t > 1 and self._update_t % self._target_network_update_interval == 0:
             self._update_target_network()
     def _update_q_network(self,transitions:NGUTransition,weights:np.ndarray):
@@ -405,7 +408,7 @@ class NGULearner(Learner):
         loss = torch.mean(retrace_loss * weights.detach())
         loss.backward()
         
-        if self._clip_grad:
+        if self._clip_gradients:
             torch.nn.utils.clip_grad_norm_(self._network.parameters(), self._max_gradient_norm)
         self._optimizer.step()
 
@@ -429,12 +432,12 @@ class NGULearner(Learner):
         # Get q values from Q network
         q_t = q_network(
             NGUNetworkInputs(
-                s_t=state_t,
-                a_tm1=last_action,
-                ext_r_t=extrinsic_reward,
-                int_r_t=intrinsic_reward,
-                policy_index=policy_index,
-                hidden_s=hidden_state,
+                state_t=state_t,
+                action_t_minus_1=last_action,
+                extrinsic_reward_t=extrinsic_reward,
+                intrinsic_reward_t=intrinsic_reward,
+                policy_index_t=policy_index,
+                hidden_state=hidden_state,
             )
         ).q_values
 
@@ -475,7 +478,7 @@ class NGULearner(Learner):
             lambda_ = self._retrace_lambda,
         )
         with torch.no_grad():
-            priorities = calculate_distributed_priorities_from_td_error(retrace.extra.td_error,self._priority_eta)
+            priorities = calculate_distributed_priorities_from_td_error(retrace.extraInformation.td_error,self._priority_eta)
         loss = torch.sum(retrace.loss , dim =0)
         return loss, priorities
     def _update_embedding_and_rnd_predictor(self,transitions:NGUTransition,weights:np.ndarray):
@@ -486,16 +489,19 @@ class NGULearner(Learner):
         
         loss = torch.mean((rnd_loss + embedding_loss) * weights.detach())
         loss.backward()
+        for name, param in self._rnd_predictor_network.named_parameters():
+            if param.grad is None:
+                print(f"No grad for {name}")
         if self._clip_gradients:
             torch.nn.utils.clip_grad_norm_(self._rnd_predictor_network.parameters(), self._max_gradient_norm)
             torch.nn.utils.clip_grad_norm_(self._embedding_network.parameters(), self._max_gradient_norm)
         self._intrinsic_optimizer.step()
         
         self._rnd_loss_t = rnd_loss.detach().mean().cpu().item()
-        self._embed_loss_t = embedding_loss.detach().mean().cpu().item()
+        self._embedding_network_loss_t = embedding_loss.detach().mean().cpu().item()
     def _get_rnd_loss(self,transition:NGUTransition)->torch.Tensor:
         state_t = numpy_to_tensor(transition.state_t[-5:],self._device,torch.float32)
-        state_t = state_t.flatten(state_t, 0,1)
+        state_t = torch.flatten(state_t, 0,1)
         normed_state_t = self._normalise_rnd_observation(state_t)
         predicted_state_t = self._rnd_predictor_network(normed_state_t)
         with torch.no_grad():
@@ -510,14 +516,14 @@ class NGULearner(Learner):
         state_t_minus_1 = state_t[0:-1,...]
         state_t = state_t[1:,...]
         action_t_minus_1 = action[:-1,...]
-        state_t_minus_1 = state_t_minus_1.flatten(state_t_minus_1,0,1)
-        state_t = state_t.flatten(state_t,0,1)
-        action_t_minus_1 = action_t_minus_1.flatten(action_t_minus_1,0,1)
+        state_t_minus_1 = torch.flatten(state_t_minus_1,0,1)
+        state_t = torch.flatten(state_t,0,1)
+        action_t_minus_1 = torch.flatten(action_t_minus_1,0,1)
         
         embedding_state_t_minus_1 = self._embedding_network(state_t_minus_1)
         embedding_state_t = self._embedding_network(state_t)
-        embeddings = torch.cat([embedding_state_t_minus_1,embedding_state_t])
-        pi_logits = self._embedding_network.predict_action(embeddings)
+        embeddings = torch.cat([embedding_state_t_minus_1,embedding_state_t],dim=-1)
+        pi_logits = self._embedding_network.predict_action_logits(embeddings)
         loss = torch.nn.functional.cross_entropy(pi_logits,action_t_minus_1,reduction='none')
         loss = loss.view(5,-1)
         loss = torch.sum(loss,dim=0)
@@ -525,7 +531,7 @@ class NGULearner(Learner):
     @torch.no_grad()
     def _normalise_rnd_observation(self,state_t:torch.Tensor)->torch.Tensor:
         rnd_observation = state_t.to(device=self._device,dtype=torch.float32)
-        normed_observation = self._rnd_observation_normalizer.normalise(rnd_observation)
+        normed_observation = self._rnd_observation_normalizer.normalize(rnd_observation)
         normed_observation = normed_observation.clamp(-5,5)
         self._rnd_observation_normalizer.update(rnd_observation)
         return normed_observation
@@ -543,25 +549,25 @@ class NGULearner(Learner):
         hidden_state = self._network(
             NGUNetworkInputs(
                 state_t = state_t,
-                action_t_minus_one = last_action,
-                extrinsic_reward = extrinsic_reward,
-                intrinsic_reward = intrinsic_reward,
-                policy_index = policy_index,
-                hidden_s = _hidden_state,
+                action_t_minus_1 = last_action,
+                extrinsic_reward_t = extrinsic_reward,
+                intrinsic_reward_t = intrinsic_reward,
+                policy_index_t = policy_index,
+                hidden_state = _hidden_state,
             )
         ).hidden_state
         target_hidden_state = self._target_network(
             NGUNetworkInputs(
                 state_t = state_t,
-                action_t_minus_one = last_action,
-                extrinsic_reward = extrinsic_reward,
-                intrinsic_reward = intrinsic_reward,
-                policy_index = policy_index,
-                hidden_s = _target_hidden_state,
+                action_t_minus_1 = last_action,
+                extrinsic_reward_t = extrinsic_reward,
+                intrinsic_reward_t = intrinsic_reward,
+                policy_index_t = policy_index,
+                hidden_state = _target_hidden_state,
             )
         ).hidden_state
         return hidden_state,target_hidden_state
-    def _extract_hidden_state(self,transitions:NGUTransition,weights:np.ndarray)->np.ndarray:
+    def _extract_hidden_state(self,transitions:NGUTransition)->np.ndarray:
         init_h = torch.from_numpy(transitions.init_h[0:1]).squeeze(0).to(device=self._device,dtype=torch.float32)
         init_c = torch.from_numpy(transitions.init_c[0:1]).squeeze(0).to(device=self._device,dtype=torch.float32)
         init_h = init_h.swapaxes(0,1)
@@ -576,7 +582,7 @@ class NGULearner(Learner):
         return {
             'retrace_loss': self._retrace_loss_t,
             'rnd_loss': self._rnd_loss_t,
-            'embed_loss': self._embed_loss_t,
+            'embed_loss': self._embedding_network_loss_t,
             'updates': self._update_t,
             'target_updates': self._target_update_t,
         }

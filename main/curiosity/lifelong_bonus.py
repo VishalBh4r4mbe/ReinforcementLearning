@@ -1,5 +1,6 @@
 
 
+import logging
 from typing import Dict
 from numpy import dtype
 import numpy
@@ -30,16 +31,19 @@ class RNDLifeLongBonusModule:
         normed_observation = normed_observation.clamp(-5,5)
         self._RND_observation_normalizer.update_single(rnd_observation)
         return normed_observation
-    @torch.no_grad()
+    
     def normalize_intrinsic_reward(self,intrinsic_reward):
+        # logging.info(type(intrinsic_reward))
         self._intrinsic_reward_normalizer.update_single(intrinsic_reward)
         normed_intrinsic_reward = intrinsic_reward/numpy.sqrt(self._intrinsic_reward_normalizer.variance + 1e-8)
         return normed_intrinsic_reward.item()
+    @torch.no_grad()
     def get_bonus(self,state_t:torch.Tensor):
         normed_state_t = self._normalize_rnd_observation(state_t)
         prediction = self._predictor_network(normed_state_t)
         target = self._target_network(normed_state_t)
-        intrinsic_reward = torch.square(prediction-target).mean(dim=1).detach().cpu().numpy()
+        # logging.info(prediction,target)
+        intrinsic_reward = torch.square(prediction-target).mean(dim=-1).detach().cpu().numpy()
         normed_intrinsic_reward_t = self.normalize_intrinsic_reward(intrinsic_reward)
         return normed_intrinsic_reward_t
     def update_predictor_network(self,state_dict:Dict):

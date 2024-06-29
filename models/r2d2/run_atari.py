@@ -24,7 +24,7 @@ from grokfast_pytorch import GrokFastAdamW
 os.environ['OMP_NUM_THREADS'] = '1'
 os.environ['MKL_NUM_THREADS'] = '1'
 FLAGS = flags.FLAGS
-flags.DEFINE_string('environment_name', 'Pong', 'Atari name without NoFrameskip and version, like Breakout, Pong, Seaquest.')
+flags.DEFINE_string('environment_name', 'Breakout', 'Atari name without NoFrameskip and version, like Breakout, Pong, Seaquest.')
 flags.DEFINE_integer('environment_height', 84, 'Environment frame screen height.')
 flags.DEFINE_integer('environment_width', 84, 'Environment frame screen width.')
 flags.DEFINE_integer('environment_frame_skip', 4, 'Number of frames to skip.')
@@ -59,7 +59,7 @@ flags.DEFINE_integer('num_eval_steps', int(2e4), 'Number of evaluation env steps
 flags.DEFINE_integer('max_episode_steps', 108000, 'Maximum steps (before frame skip) per episode.')
 flags.DEFINE_integer(
     'target_net_update_interval',
-    1000,
+    1500,
     'The interval (meassured in Q network updates) to update target Q networks.',
 )
 flags.DEFINE_integer('actor_update_interval', 400, 'The frequency (measured in actor steps) to update actor local Q network.')

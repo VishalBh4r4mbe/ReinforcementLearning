@@ -45,7 +45,6 @@ class PytorchCheckpointManager:
             raise RuntimeError(f'the checkpoint file does not belong to the same environment, checkpoint belongs to :{loaded_state["environment_name"]}')
         if 'agent_name' in loaded_state and loaded_state["agent_name"] != self.state.agent_name:
             raise RuntimeError(f'the checkpoint file does not belong to the same environment, checkpoint belongs to :{loaded_state["agent_name"]}')
-        loaded_keys = [k for k in loaded_state.keys()]
         for key, value in loaded_state:
             if key not in self.state:
                 continue

@@ -2,6 +2,22 @@ from absl import app
 from absl import flags
 from absl import logging
 import os
+from os.path import dirname
+import sys
+
+dir_name = dirname(__file__)
+main_file = dirname(dirname(dirname(__file__)))
+print(main_file)
+sys.path.append(main_file)
+from models import common_loops
+from main.ReplayUtils.common import compress, decompress
+from main.ReplayUtils.replayBuffers import PrioritizedReplay
+from main.checkpoint_manager import PytorchCheckpointManager
+from main.networks.curiosity_networks import NGUEmbedding, RNDConv
+from main.networks.value_networks import NGUConv, NGUNetworkInputs
+from models.ngu.ngu import NGUActor, NGULearner, NGUTransition
+from main.actors import NGUEpsilonGreedyActor
+from main.gym import gym_environment
 
 os.environ['OMP_NUM_THREADS'] = '1'
 os.environ['MKL_NUM_THREADS'] = '1'
@@ -54,16 +70,16 @@ flags.DEFINE_integer(
     'maximum replay size'
 )
 flags.DEFINE_integer(
-    'min_replay_size',
+    'minimum_replay_size',
     1000,
     'Minimum replay size before learning'
 )
 flags.DEFINE_bool(
-    'clip_gradient',
+    'clip_gradients',
     True,
     'Clip gradients'
 )
-flags.DEFINE_bool(
+flags.DEFINE_float(
     'max_gradient_norm',
     40.0,
     'max gradient norm'
@@ -125,7 +141,7 @@ flags.DEFINE_integer(
 )
 flags.DEFINE_integer('max_episode_steps', 108000, 'Maximum steps (before frame skip) per episode.')
 flags.DEFINE_integer(
-    'target_net_update_interval',
+    'target_network_update_interval',
     1500,
     'The interval (meassured in Q network updates) to update target Q networks.',
 )
@@ -144,7 +160,7 @@ flags.DEFINE_string('results_csv_path', './logs/ngu_atari_results.csv', 'Path fo
 flags.DEFINE_string('checkpoint_dir', './checkpoints', 'Path for checkpoint directory.')
 
 flags.register_validator('environment_frame_stack', lambda x: x == 1)
-
+torch.autograd.set_detect_anomaly(True)
 def main(argv):
     del argv
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -152,6 +168,184 @@ def main(argv):
     np.random.seed(FLAGS.seed)
     torch.manual_seed(FLAGS.seed)
     if torch.backends.cudnn.enabled:
-        torch.backends.cudnn.benchmark = True
+        torch.backends.cudnn.benchmark = False
         torch.backends.cudnn.deterministic = True
+    random_state = np.random.RandomState(FLAGS.seed)
+    def environment_builder():
+        return gym_environment.get_atari_environment(
+            env_name=FLAGS.environment_name,
+            frame_height=FLAGS.environment_height,
+            frame_width=FLAGS.environment_width,
+            frame_skip=FLAGS.environment_frame_skip,
+            frame_stack=FLAGS.environment_frame_stack,
+            max_episode_steps=FLAGS.max_episode_steps,
+            seed=random_state.randint(1, 2**10),
+            noop_max=30,
+            terminal_on_life_loss=True,
+            sticky_action=False,
+            clip_reward=False,
+        )
+    eval_env = environment_builder()
+    action_dim = eval_env.action_space.__dict__.__getitem__('n')
+    state_dim = eval_env.observation_space.shape
+    logging.info(f'environment name:{FLAGS.environment_name}')
+    logging.info(f'observation space dimension:{state_dim}')
+    logging.info(f'action space dimension:{action_dim}')
+    network = NGUConv(state_dim, action_dim,FLAGS.num_policies)
+    optimizer = torch.optim.AdamW(network.parameters(),lr=FLAGS.learning_rate,eps =FLAGS.adam_epsilon)
+
+    observation , _ = eval_env.reset()
+    RND_target_net = RNDConv(state_dim=state_dim,is_target=True)
+    RND_predictor_net = RNDConv(state_dim=state_dim,is_target=False)
     
+    NGU_embedding_net = NGUEmbedding(state_dim=state_dim,action_dim=action_dim,embedding_size=256)
+    intrinsic_optimizer = torch.optim.AdamW(
+        list(NGU_embedding_net.parameters()) + list(RND_predictor_net.parameters()),
+        lr = FLAGS.intrinsic_learning_rate,
+        eps=FLAGS.adam_epsilon
+    )
+    inp = NGUNetworkInputs(
+        state_t=torch.from_numpy(observation[None,None,...]).float(),
+        action_t_minus_1=torch.zeros(1,1).long(),
+        extrinsic_reward_t=torch.zeros(1, 1).float(),
+        intrinsic_reward_t=torch.zeros(1, 1).float(),
+        policy_index_t=torch.zeros(1, 1).long(),
+        hidden_state=network.get_initial_hidden_state(1),
+    )
+    network_output = network(inp)
+    assert network_output.q_values.shape == (1, 1, action_dim)
+    assert len(network_output.hidden_state) == 2
+    importance_sampling_exponent = FLAGS.importance_sampling_exponent
+
+    def importance_sampling_exponent_schedule(x):
+        return importance_sampling_exponent
+    if FLAGS.compress_state:
+
+        def encoder(transition):
+            return transition._replace(
+                state_t=compress(transition.state_t),
+            )
+
+        def decoder(transition):
+            return transition._replace(
+                state_t=decompress(transition.state_t),
+            )
+
+    else:
+        encoder = None
+        decoder = None
+    replay = PrioritizedReplay(
+        size=FLAGS.replay_size,
+        structure=NGUTransition(None,None,None,None,None,None,None,None,None,None,None,None,None),
+        priority_exponent=FLAGS.priority_exponent,
+        importance_sampling_exponent=importance_sampling_exponent_schedule,
+        normalize_weights=FLAGS.normalize_weights,
+        random_state=random_state,
+        time_major=True,
+        encoder=encoder,
+        decoder=decoder
+    )
+    data_queue = multiprocessing.Queue(maxsize=FLAGS.num_actors * 2)
+
+    manager = multiprocessing.Manager()
+
+    shared_params = manager.dict(
+        {
+            'network': None,
+            'embedding_network': None,
+            'rnd_predictor_network': None,
+        }
+    )
+    learner = NGULearner(
+        network=network,
+        optimizer=optimizer,
+        embedding_network=NGU_embedding_net,
+        RND_predictor_network=RND_predictor_net,
+        RND_target_network=RND_target_net,
+        intrinsic_optimizer=intrinsic_optimizer,
+        replay_buffer=replay,
+        target_network_update_interval=FLAGS.target_network_update_interval,
+        minimum_replay_size=FLAGS.minimum_replay_size,
+        batch_size=FLAGS.batch_size,
+        unroll_length=FLAGS.unroll_length,
+        burn_in=FLAGS.burn_in,
+        retrace_lambda=FLAGS.retrace_lambda,
+        transformed_retrace=FLAGS.transformed_retrace,
+        priority_eta=FLAGS.priority_eta,
+        clip_gradients=FLAGS.clip_gradients,
+        max_gradient_norm=FLAGS.max_gradient_norm,
+        device=device,
+        shared_parameters=shared_params
+    )
+    actor_envs = [environment_builder() for _ in range(FLAGS.num_actors)]
+
+    actor_devices = ['cpu'] * FLAGS.num_actors
+    if torch.cuda.is_available() and FLAGS.actors_on_gpu:
+        num_gpus = torch.cuda.device_count()
+        actor_devices = [torch.device(f'cuda:{i % num_gpus}') for i in range(FLAGS.num_actors)]
+    actors = [NGUActor(
+        rank=i,
+        data_queue=data_queue,
+        network=copy.deepcopy(network),
+        RND_predictor_network=copy.deepcopy(RND_predictor_net),
+        RND_target_network=copy.deepcopy(RND_target_net),
+        embedding_network=copy.deepcopy(NGU_embedding_net),
+        random_state=np.random.RandomState(FLAGS.seed + int(i)),
+        extrinsic_discount=FLAGS.extrinsic_discount,
+        intrinsic_discount=FLAGS.intrinsic_discount,
+        policy_beta=FLAGS.policy_beta,
+        num_actors=FLAGS.num_actors,
+        action_dim=action_dim,
+        unroll_length=FLAGS.unroll_length,
+        burn_in=FLAGS.burn_in,
+        num_policies=FLAGS.num_policies,
+        reset_episodic_memory=FLAGS.reset_episodic_memory,
+        num_neighbors=FLAGS.num_neighbors,
+        cluster_distance=FLAGS.cluster_distance,
+        kernel_epsilon=FLAGS.kernel_epsilon,
+        maximum_similarity=FLAGS.max_similarity,
+        actor_update_interval=FLAGS.actor_update_interval,
+        device=actor_devices[i],
+        shared_parameters=shared_params,
+        episodic_memory_size=FLAGS.episodic_memory_size,
+    ) for i in range(FLAGS.num_actors)]
+    eval_agent = NGUEpsilonGreedyActor(
+        network=network,
+        rnd_predictor_network=RND_predictor_net,
+        rnd_target_network=RND_target_net,
+        embedding_network=NGU_embedding_net,
+        exploration_epsilon = FLAGS.eval_exploration_epsilon,
+        episodic_memory_size=FLAGS.episodic_memory_size,
+        num_neighbors = FLAGS.num_neighbors,
+        kernel_epsilon=FLAGS.kernel_epsilon,
+        cluster_distance = FLAGS.cluster_distance,
+        maximum_similarity=FLAGS.max_similarity,
+        random_state=random_state,
+        device=device
+    )
+    checkpoint_manager = PytorchCheckpointManager(environment_name=FLAGS.environment_name, agent_name='R2D2', save_dir=FLAGS.checkpoint_dir)
+    checkpoint_manager.register_pair(('network', network))
+    checkpoint_manager.register_pair(('rnd_target_network', RND_target_net))
+    checkpoint_manager.register_pair(('rnd_predictor_network', RND_predictor_net))
+    checkpoint_manager.register_pair(('embedding_network', NGU_embedding_net))
+    common_loops.run_parallel_training_iterations(
+        num_iterations=FLAGS.num_iterations,
+        num_train_steps=FLAGS.num_train_steps,
+        num_eval_steps=FLAGS.num_eval_steps,
+        learner=learner,
+        eval_agent=eval_agent,
+        eval_env=eval_env,
+        actors=actors,
+        actor_envs=actor_envs,
+        data_queue=data_queue,
+        checkpoint_manager=checkpoint_manager,
+        csv_file=FLAGS.results_csv_path,
+        use_tensorboard=FLAGS.use_tensorboard,
+        tag=FLAGS.tag,
+        debug_screenshots_interval=FLAGS.debug_screenshots_interval,
+        folder=dir_name
+    )
+if __name__ == '__main__':
+    # Set multiprocessing start mode
+    multiprocessing.set_start_method('spawn')
+    app.run(main)

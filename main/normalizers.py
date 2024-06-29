@@ -1,6 +1,9 @@
 
+import logging
 import numpy as np
 import torch
+
+from models.common import numpy_to_tensor
 
 
 class PytorchRunningMeanStd:
@@ -52,13 +55,14 @@ class RunningMeanStd:
         self.mean += delta *n/self.count
         m_a = self.variance * (self.count - n)
         m_b = batched_variance * n
-        M2 = m_a + m_b + torch.square(delta)*n
+        M2 = m_a + m_b + np.square(delta)*n
         self.variance = M2/self.count
 
     def update_single(self,x):
         self.deltas.append(x)
         if len(self.deltas) >= self.minimun_size:
-            batched_x = torch.concat(self.deltas,dim=0)
+            # logging.info(self.deltas)
+            batched_x = np.stack(self.deltas,axis=0)
             self.update(batched_x)
             del self.deltas[:]
     def normalize(self,x):

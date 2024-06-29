@@ -4,6 +4,10 @@ import numpy as np
 import torch
 from main.abstractClasses.agent import Agent
 from main.abstractClasses.timestep import TimeStepPair
+from main.curiosity.episodic_bonus import EpisodicBonusModule
+from main.curiosity.lifelong_bonus import RNDLifeLongBonusModule
+from main.networks.value_networks import NGUNetworkInputs
+from models.common import numpy_to_tensor
 
 def apply_egreedy_policy(
     q_values: torch.Tensor,
@@ -110,3 +114,86 @@ class R2D2EpsilonGreedyActor(EpsilonGreedyActor):
     def reset(self) -> None:
         self._last_action = 0 
         self._lstm_state = self._network.get_initial_hidden_state(batch_size=1)
+class NGUEpsilonGreedyActor(EpsilonGreedyActor):
+    def __init__(
+        self,
+        network:torch.nn.Module,
+        embedding_network:torch.nn.Module,
+        rnd_target_network:torch.nn.Module,
+        rnd_predictor_network:torch.nn.Module,
+        episodic_memory_size:int,
+        num_neighbors:int,
+        cluster_distance:float,
+        kernel_epsilon:float,
+        maximum_similarity:float,
+        exploration_epsilon:float,
+        random_state:np.random.RandomState,
+        device:torch.device
+    ):
+        super().__init__(
+            network=network,
+            exploration_epsilon=exploration_epsilon,
+            random_state=random_state,
+            device=device,
+            name='NGU-greedy',
+        )
+        self._policy_index = 0
+        self._policy_beta = 0
+        self._episodic_module = EpisodicBonusModule(
+            embedding_network=embedding_network,
+            device=device,
+            size=episodic_memory_size,
+            num_neighbors=num_neighbors,
+            kernel_epsilon=kernel_epsilon,
+            cluster_distance=cluster_distance,
+            maximum_similarity=maximum_similarity
+        )
+        self._lifelong_module = RNDLifeLongBonusModule(
+            target_network=rnd_target_network,
+            predictor_network=rnd_predictor_network,
+            device=device,
+            discount=0.99
+        )
+        self._last_action = None
+        self._episodic_bonus_t = None
+        self._lifelong_bonus_t = None
+        self._lstm_state = self._network.get_initial_hidden_state(batch_size=1)
+    @torch.no_grad()
+    def step(self,timestep:TimeStepPair) -> Action:
+        action_t = self._select_action(timestep=timestep)
+        state_t = numpy_to_tensor(array = timestep.observation[None,...],device=self._device,dtype=torch.float32)
+        self._lifelong_bonus_t = self._lifelong_module.get_bonus(state_t)
+        self._episodic_bonus_t = self._episodic_module.get_bonus(state_t)
+        return action_t
+    @torch.no_grad()
+    def _select_action(self,timestep:TimeStepPair) -> Action:
+        state_t = torch.tensor(timestep.observation[None,...]).to(device=self._device,dtype=torch.float32)
+        action_t_minus_1 = torch.tensor(self._last_action).to(device=self._device,dtype=torch.int64)
+        extrinsic_reward = torch.tensor(timestep.reward).to(device=self._device,dtype=torch.float32)
+        intrinsic_reward = torch.tensor(self.intrinsic_reward).to(self._device,torch.float32)
+        policy_index = torch.tensor(self._policy_index).to(device=self._device,dtype=torch.int64)
+        hidden_state = tuple(s.to(device=self._device) for s in self._lstm_state)
+        pi_output = self._network(
+            NGUNetworkInputs(
+                state_t=state_t[None,...],
+                action_t_minus_1=action_t_minus_1[None,...],
+                extrinsic_reward_t=extrinsic_reward[None,...],
+                intrinsic_reward_t=intrinsic_reward[None,...],
+                policy_index_t=policy_index[None,...],
+                hidden_state=hidden_state,
+            )
+        )
+        q_t = pi_output.q_values
+        self._lstm_state = pi_output.hidden_state
+        action_t = apply_egreedy_policy(q_t,epsilon=self._exploration_epsilon,random_state=self._random_state)
+        self._last_action = action_t
+        return action_t
+    def reset(self):
+        self._last_action = 0
+        self._episodic_bonus_t = 0.0
+        self._lifelong_bonus_t = 0.0
+        self._lstm_state = self._network.get_initial_hidden_state(batch_size=1)
+        self._episodic_module.reset()
+    @property
+    def intrinsic_reward(self) -> torch.Tensor:
+        return self._episodic_bonus_t * min(max(self._lifelong_bonus_t,1.0),5.0)
