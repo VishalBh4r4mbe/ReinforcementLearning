@@ -35,7 +35,7 @@ class RNDLifeLongBonusModule:
     def normalize_intrinsic_reward(self,intrinsic_reward):
         # logging.info(type(intrinsic_reward))
         self._intrinsic_reward_normalizer.update_single(intrinsic_reward)
-        normed_intrinsic_reward = intrinsic_reward/numpy.sqrt(self._intrinsic_reward_normalizer.variance + 1e-8)
+        normed_intrinsic_reward = intrinsic_reward/numpy.sqrt(self._intrinsic_reward_normalizer.var + 1e-8)
         return normed_intrinsic_reward.item()
     @torch.no_grad()
     def get_bonus(self,state_t:torch.Tensor):

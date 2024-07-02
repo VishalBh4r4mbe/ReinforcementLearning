@@ -15,8 +15,7 @@ def init_weights_of_net(net:torch.nn.Module):
     for module in net.modules():
         if isinstance(module, (torch.nn.Conv2d, torch.nn.Linear)):
             torch.nn.init.kaiming_uniform_(module.weight, nonlinearity='relu')
-            if module.bias is not None:
-                torch.nn.init.zeros_(module.bias)
+
 
 class BackboneConv(torch.nn.Module):
     def __init__(self, state_dim:Tuple) -> None:

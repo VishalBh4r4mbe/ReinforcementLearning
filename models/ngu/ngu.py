@@ -5,8 +5,10 @@
 
 
 import copy
+import logging
 import multiprocessing
 from re import S
+import time
 from typing import Iterable, Mapping, NamedTuple, Optional, Text, Tuple
 import numpy as np
 import torch
@@ -75,7 +77,7 @@ class NGUActor(Agent):
         maximum_similarity:float,
         actor_update_interval:int,
         device:torch.device,
-        shared_parameters:dict,
+        shared_parameters,
         c_constant:float=0.001
     ) -> None:
         if not 0.0 <= extrinsic_discount <= 1.0:
@@ -166,6 +168,12 @@ class NGUActor(Agent):
         self._life_long_bonus_t = None
         self._lstm_state = None
         self._step_t = -1
+        self._embedding_update_count = 0
+        self._rnd_update_count = 0
+        self._actor_update_count=0
+        self._q_update_timestamp = None
+        self._rnd_update_timestamp = None
+        self._embedding_update_timestamp = None
     @torch.no_grad()
     def step(self, timestep_pair: TimeStepPair) -> Action:
         self._step_t += 1
@@ -189,8 +197,11 @@ class NGUActor(Agent):
         )
         unrolled_transition = self._unroller.add(transition,timestep_pair.done)
         state = numpy_to_tensor(timestep_pair.observation[None,...],self._device,torch.float32)
-        self._life_long_bonus_t = self._life_long_bonus_module.get_bonus(state)
-        self._episodic_bonus_t = self._episodic_bonus_module.get_bonus(state)
+        llb = self._life_long_bonus_module.get_bonus(state)
+        eb = self._episodic_bonus_module.get_bonus(state)
+        # print(llb,eb)
+        self._life_long_bonus_t = llb
+        self._episodic_bonus_t = eb
         self._last_action = action
         self._lstm_state = hidden_state
         if unrolled_transition is not None:
@@ -238,26 +249,39 @@ class NGUActor(Agent):
     def _load_unrolled_transition_to_queue(self,transition:NGUTransition):
         self._data_queue.put(transition)
     def _update_actor_network(self,update_embedding:bool = False):
-        
+        # print("_update_actor_network called with update_embedding" + str(update_embedding))
         q_state_dict = self._shared_parameters['network']
         embedding_state_dict = self._shared_parameters['embedding_network']
         RND_state_dict = self._shared_parameters['rnd_predictor_network']
-        if update_embedding:
-            state_net_pairs = zip(
-                (q_state_dict, embedding_state_dict, RND_state_dict),
-                (self._network, self._embedding_network, self._rnd_predictor_network),
-            )
-        else:
-            state_net_pairs = zip(
-                (q_state_dict, RND_state_dict),
-                (self._network, self._rnd_predictor_network),
-            )
+        weight_update_timestamp = self._shared_parameters['timestamp']
+        # logging.info("RND_state_dict={}".format(RND_state_dict))
+        # logging.info("embedding_state_dict={}".format(embedding_state_dict))
+        # logging.info("q_state_dict={}".format(q_state_dict))
+        
+        if RND_state_dict is not None and self._rnd_update_timestamp !=weight_update_timestamp:
+            if self._device != 'cpu':
+                RND_state_dict = {k: v.to(device=self._device) for k, v in RND_state_dict.items()}
+            self._rnd_predictor_network.load_state_dict(RND_state_dict)
+            self._rnd_update_count+=1
+            self._rnd_update_timestamp =weight_update_timestamp
 
-        for state_dict, network in state_net_pairs:
-            if state_dict is not None:
-                if self._device != 'cpu':
-                    state_dict = {k: v.to(device=self._device) for k, v in state_dict.items()}
-                network.load_state_dict(state_dict)
+        if embedding_state_dict is not None and update_embedding==True and self._embedding_update_timestamp != weight_update_timestamp:
+            if self._device != 'cpu':
+                embedding_state_dict = {k: v.to(device=self._device) for k, v in embedding_state_dict.items()}
+            self._embedding_network.load_state_dict(embedding_state_dict)
+            self._embedding_update_count+=1
+            self._embedding_update_timestamp =weight_update_timestamp
+
+            
+        if q_state_dict is not None and self._q_update_timestamp != weight_update_timestamp:
+            if self._device!= 'cpu':
+                q_state_dict = {k: v.to(device=self._device) for k, v in q_state_dict.items()}
+            self._network.load_state_dict(q_state_dict)
+            self._actor_update_count+=1
+            self._q_update_timestamp =weight_update_timestamp
+
+        self._episodic_bonus_module.update_embedding_network(self._embedding_network.state_dict())
+        self._life_long_bonus_module.update_predictor_network(self._rnd_predictor_network.state_dict())
     def _sample_policy(self):
         self._policy_index = np.random.randint(0, self._num_policies)
         self._policy_beta = self._betas[self._policy_index]
@@ -275,9 +299,12 @@ class NGUActor(Agent):
             'intrinsic_reward': self.intrinsic_reward,
             'episodic_bonus': self._episodic_bonus_t,
             'lifelong_bonus': self._lifelong_bonus_t,
+            'embedding_update_count': self._embedding_update_count,
+            'rnd_update_count':self._actor_update_count,
+            'actor_update_count':self._actor_update_count,
         }
         
-class NGULearner(Learner):
+class NGULearner(Learner): 
     def __init__(
         self,
         network:torch.nn.Module,
@@ -285,7 +312,8 @@ class NGULearner(Learner):
         embedding_network:torch.nn.Module,
         RND_target_network:torch.nn.Module,
         RND_predictor_network:torch.nn.Module,
-        intrinsic_optimizer:torch.optim.Optimizer,
+        intrinsic_embedding_optimizer:torch.optim.Optimizer,
+        intrinsic_rnd_optimizer:torch.optim.Optimizer,
         replay_buffer: PrioritizedReplay,
         target_network_update_interval:int,
         minimum_replay_size:int,
@@ -298,7 +326,7 @@ class NGULearner(Learner):
         clip_gradients:bool,
         max_gradient_norm:float,
         device:torch.device,
-        shared_parameters:dict
+        shared_parameters
     ):
         if not target_network_update_interval > 0:
             raise ValueError('target_network_update_interval must be > 0')
@@ -325,8 +353,9 @@ class NGULearner(Learner):
         self._embedding_network.train()
         self._rnd_predictor_network = RND_predictor_network.to(device=device)
         self._rnd_predictor_network.train()
-        self._intrinsic_optimizer = intrinsic_optimizer
-        
+        self._intrinsic_embedding_optimizer = intrinsic_embedding_optimizer
+        self._intrinsic_rnd_optimizer = intrinsic_rnd_optimizer
+
         self._rnd_target_network = RND_target_network.to(device=device)
         self._target_network = copy.deepcopy(self._network).to(device=device)
         disable_autograd(self._target_network)
@@ -388,6 +417,7 @@ class NGULearner(Learner):
         self._shared_parameters['network'] = self.get_network_state_dict()
         self._shared_parameters['embedding_network'] = self.get_embedding_network_state_dict()
         self._shared_parameters['rnd_predictor_network'] = self.get_rnd_predictor_network_state_dict()
+        self._shared_parameters['timestamp'] = time.time_ns()
         if self._update_t > 1 and self._update_t % self._target_network_update_interval == 0:
             self._update_target_network()
     def _update_q_network(self,transitions:NGUTransition,weights:np.ndarray):
@@ -483,20 +513,36 @@ class NGULearner(Learner):
         return loss, priorities
     def _update_embedding_and_rnd_predictor(self,transitions:NGUTransition,weights:np.ndarray):
         weights = numpy_to_tensor(weights,self._device,torch.float32)
-        self._intrinsic_optimizer.zero_grad()
+        self._intrinsic_embedding_optimizer.zero_grad(set_to_none=True)
+        self._intrinsic_rnd_optimizer.zero_grad(set_to_none=True)
         rnd_loss = self._get_rnd_loss(transitions)
         embedding_loss = self._get_embedding_loss(transitions)
-        
-        loss = torch.mean((rnd_loss + embedding_loss) * weights.detach())
-        loss.backward()
-        for name, param in self._rnd_predictor_network.named_parameters():
-            if param.grad is None:
-                print(f"No grad for {name}")
+        rnd_loss = torch.mean((rnd_loss) * weights.detach())
+        rnd_loss.backward()
+        embedding_loss = torch.mean((embedding_loss) * weights.detach())
+        embedding_loss.backward()
+        # for name, param in self._rnd_predictor_network.named_parameters():
+        #     if param.grad is None:
+        #         print(f"No grad for RND predictor: {name}")
+        #     else:
+        #         print(f"Grad norm for RND predictor {name}: {param.grad.norm().item()}")
+    
+        # for name, param in self._embedding_network.named_parameters():
+        #     if param.grad is None:
+        #         print(f"No grad for Embedding network: {name}")
+        #     else:
+        #         print(f"Grad norm for Embedding network {name}: {param.grad.norm().item()}")
         if self._clip_gradients:
             torch.nn.utils.clip_grad_norm_(self._rnd_predictor_network.parameters(), self._max_gradient_norm)
             torch.nn.utils.clip_grad_norm_(self._embedding_network.parameters(), self._max_gradient_norm)
-        self._intrinsic_optimizer.step()
+        # print(f"Intrinsic optimizer state: {self._intrinsic_optimizer.state_dict()}")
         
+        self._intrinsic_embedding_optimizer.step()
+        self._intrinsic_rnd_optimizer.step()
+        # print(f"RND loss diff: {self._rnd_loss_t - rnd_loss.detach().mean().cpu()}")
+        # print(f"Embedding loss diff: {self._embedding_network_loss_t - embedding_loss.detach().mean().cpu()}")
+        # print(f"RND loss: {rnd_loss.mean().item()}")
+        # print(f"Embedding loss: {embedding_loss.mean().item()}")
         self._rnd_loss_t = rnd_loss.detach().mean().cpu().item()
         self._embedding_network_loss_t = embedding_loss.detach().mean().cpu().item()
     def _get_rnd_loss(self,transition:NGUTransition)->torch.Tensor:

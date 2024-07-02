@@ -19,9 +19,6 @@ from models.ngu.ngu import NGUActor, NGULearner, NGUTransition
 from main.actors import NGUEpsilonGreedyActor
 from main.gym import gym_environment
 
-os.environ['OMP_NUM_THREADS'] = '1'
-os.environ['MKL_NUM_THREADS'] = '1'
-
 
 import multiprocessing
 import numpy as np
@@ -188,19 +185,25 @@ def main(argv):
     eval_env = environment_builder()
     action_dim = eval_env.action_space.__dict__.__getitem__('n')
     state_dim = eval_env.observation_space.shape
+    
     logging.info(f'environment name:{FLAGS.environment_name}')
     logging.info(f'observation space dimension:{state_dim}')
     logging.info(f'action space dimension:{action_dim}')
     network = NGUConv(state_dim, action_dim,FLAGS.num_policies)
-    optimizer = torch.optim.AdamW(network.parameters(),lr=FLAGS.learning_rate,eps =FLAGS.adam_epsilon)
+    optimizer = GrokFastAdamW(network.parameters(True),lr=FLAGS.learning_rate,eps =FLAGS.adam_epsilon)
 
     observation , _ = eval_env.reset()
     RND_target_net = RNDConv(state_dim=state_dim,is_target=True)
     RND_predictor_net = RNDConv(state_dim=state_dim,is_target=False)
     
     NGU_embedding_net = NGUEmbedding(state_dim=state_dim,action_dim=action_dim,embedding_size=256)
-    intrinsic_optimizer = torch.optim.AdamW(
-        list(NGU_embedding_net.parameters()) + list(RND_predictor_net.parameters()),
+    intrinsic_embedding_optimizer = GrokFastAdamW(
+        NGU_embedding_net.parameters(True),
+        lr = FLAGS.intrinsic_learning_rate,
+        eps=FLAGS.adam_epsilon
+    )
+    intrinsic_rnd_optimizer = GrokFastAdamW(
+        RND_predictor_net.parameters(True),
         lr = FLAGS.intrinsic_learning_rate,
         eps=FLAGS.adam_epsilon
     )
@@ -254,6 +257,7 @@ def main(argv):
             'network': None,
             'embedding_network': None,
             'rnd_predictor_network': None,
+            'timestamp': None,
         }
     )
     learner = NGULearner(
@@ -262,7 +266,8 @@ def main(argv):
         embedding_network=NGU_embedding_net,
         RND_predictor_network=RND_predictor_net,
         RND_target_network=RND_target_net,
-        intrinsic_optimizer=intrinsic_optimizer,
+        intrinsic_embedding_optimizer=intrinsic_embedding_optimizer,
+        intrinsic_rnd_optimizer=intrinsic_rnd_optimizer,
         replay_buffer=replay,
         target_network_update_interval=FLAGS.target_network_update_interval,
         minimum_replay_size=FLAGS.minimum_replay_size,
