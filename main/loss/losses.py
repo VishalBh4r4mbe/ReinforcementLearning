@@ -30,4 +30,21 @@ def double_q_learning_loss(
     loss = 0.5 * td_error**2
     return LossAndExtra(loss,DDQLearningExtra(target=target_t_minus_1,td_error=td_error,best_action=best_action))
     
+def value_loss(
+    target:torch.Tensor,
+    predict:torch.Tensor
+):
+    loss = 0.5 * torch.square(target-predict)
+    if len(loss.shape)==2:
+        loss = torch.mean(loss,dim=0)
+    
+    return LossAndExtra(loss, None)
+def policy_gradient_loss(logits_t , action_t , adv_t):
+    m = torch.distributions.Categorical(logits=logits_t)
+    logprob_a_t = m.log_prob(action_t).view_as(adv_t)
+    loss = logprob_a_t * adv_t.detach()
+    
+    if len(loss.shape)==2:
+        loss = torch.mean(loss,dim=0)
+    return LossAndExtra(loss,None)
     

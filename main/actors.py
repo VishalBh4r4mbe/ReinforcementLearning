@@ -6,6 +6,7 @@ from main.abstractClasses.agent import Agent
 from main.abstractClasses.timestep import TimeStepPair
 from main.curiosity.episodic_bonus import EpisodicBonusModule
 from main.curiosity.lifelong_bonus import RNDLifeLongBonusModule
+from main.distributions import categorical_distribution
 from main.networks.value_networks import NGUNetworkInputs
 from models.common import numpy_to_tensor
 
@@ -197,3 +198,50 @@ class NGUEpsilonGreedyActor(EpsilonGreedyActor):
     @property
     def intrinsic_reward(self) -> torch.Tensor:
         return self._episodic_bonus_t * min(max(self._lifelong_bonus_t,1.0),5.0)
+    
+class PolicyGreedyActor(Agent):
+    """Agent that acts with a given set of policy network parameters."""
+
+    def __init__(
+        self,
+        network: torch.nn.Module,
+        device: torch.device,
+        name: str = '',
+    ):
+        self.agent_name = name
+        self._device = device
+        self._network = network.to(device=device)
+
+    def step(self, timestep:TimeStepPair) -> Action:
+        """Give current timestep, return best action"""
+        return self.act(timestep)
+
+    def act(self, timestep: TimeStepPair) -> Action:
+        """Selects action given a timestep."""
+        return self._select_action(timestep)
+
+    def reset(self) -> None:
+        """Resets the agent's episodic state such as frame stack and action repeat.
+
+        This method should be called at the beginning of every episode.
+        """
+
+    @torch.no_grad()
+    def _select_action(self, timestep: TimeStepPair) -> Action:
+        """Samples action from policy at given state."""
+        s_t = torch.tensor(timestep.observation[None, ...]).to(device=self._device, dtype=torch.float32)
+        pi_logits_t = self._network(s_t).pi_logits
+
+        # Sample an action
+        a_t = categorical_distribution(pi_logits_t).sample()
+
+        # # Can also try to act greedy
+        # prob_t = F.softmax(pi_logits, dim=1)
+        # a_t = torch.argmax(prob_t, dim=1)
+
+        return a_t.cpu().item()
+
+    @property
+    def statistics(self) -> Mapping[Text, float]:
+        """Empty statistics"""
+        return {}
