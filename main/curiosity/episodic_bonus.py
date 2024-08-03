@@ -66,8 +66,10 @@ class EpisodicBonusModule:
         if similarity>self._max_similarity:
             return 0.0
         return (1/similarity).cpu().item()
-    def reset(self):
+    def reset(self,reset_memory=True):
         self._mask = torch.zeros(self._size,dtype=torch.bool,device=self._device)
         self._counter = 0
+        if reset_memory:
+            self._memory=torch.zeros(self._size, self._embedding_network.embedding_size,device=self._device)
     def update_embedding_network(self,state_dict:Dict):
         self._embedding_network.load_state_dict(state_dict)

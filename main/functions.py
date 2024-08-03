@@ -162,7 +162,7 @@ def get_ngu_betas(
 		elif i == num_policies - 1:
 			results.append(beta)
 		else:
-			beta = beta * sigmoid(10 * ((2 * i - (num_policies - 2)) / (num_policies - 2)))
+			beta = beta * sigmoid(((2 * i - (num_policies - 2)) / (num_policies - 2)))
 			results.append(beta)
 
 	return results
